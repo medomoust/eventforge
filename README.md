@@ -1,29 +1,210 @@
 # EventForge
 
-## Project Summary
+> A production-ready serverless event ingestion and processing platform demonstrating operational maturity, reliability patterns, and observability best practices.
 
-EventForge is a scalable, serverless event ingestion and processing system built on AWS. It provides a robust pipeline for receiving, queuing, processing, and storing event data with built-in reliability and observability features.
+## Project Overview
 
-## Architecture Overview
+EventForge is a **serverless event ingestion and processing platform** built on AWS that showcases real-world distributed systems architecture. It provides a robust, scalable pipeline for receiving, queuing, processing, and persisting event data with built-in reliability guarantees and comprehensive observability.
 
-EventForge follows a modern serverless architecture pattern:
+**Key Characteristics:**
+- **Fully Serverless**: Built entirely on managed AWS services (API Gateway, Lambda, SQS, DynamoDB, CloudWatch)
+- **Production-Grade**: Includes monitoring dashboards, alarms, dead letter queues, and structured logging
+- **Reliable by Design**: Implements idempotency, conditional writes, and retry mechanisms
+- **Operationally Mature**: CloudWatch dashboards, alarms for critical metrics, and searchable JSON logs
+- **Cost-Efficient**: Pay-per-use pricing model with automatic scaling
+
+## High-Level Architecture
+
+EventForge implements a decoupled event-driven architecture pattern commonly used in production systems:
 
 ```
-Client → API Gateway → Lambda (Ingest) → SQS → Lambda (Processor) → DynamoDB
-                                          ↓
-                                         DLQ (Dead Letter Queue)
+┌────────┐    HTTP POST     ┌─────────────┐
+│ Client │ ───────────────> │ API Gateway │
+└────────┘                  └──────┬──────┘
+                                   │
+                                   ▼
+                          ┌────────────────┐
+                          │ Ingest Lambda  │ ← Validates event schema
+                          └────────┬───────┘   Enriches with metadata
+                                   │           Publishes to SQS
+                                   ▼
+                            ┌─────────┐
+                            │   SQS   │ ← Decouples ingestion from processing
+                            │  Queue  │   Provides buffering & retries
+                            └────┬────┘
+                                 │
+                    ┌────────────┴────────────┐
+                    │                         │
+                    ▼                         ▼
+          ┌──────────────────┐      ┌──────────────┐
+          │ Processor Lambda │      │ Dead Letter  │
+          └────────┬─────────┘      │    Queue     │
+                   │                └──────────────┘
+                   │                      ▲
+                   ▼                      │
+           ┌──────────────┐              │
+           │   DynamoDB   │         (Failed after
+           │ Event Store  │          3 retries)
+           └──────────────┘
 ```
 
-**Key Components:**
+**Architecture Components:**
 
-- **API Gateway**: REST API endpoint for receiving events
-- **Ingest Lambda**: Validates and publishes events to SQS
-- **SQS Queue**: Decouples ingestion from processing, provides buffering
-- **Processor Lambda**: Processes events and persists to DynamoDB
-- **DynamoDB**: NoSQL database for event storage
-- **DLQ**: Handles failed messages for investigation and replay
+1. **API Gateway**: Exposes REST endpoint (`POST /events`) with CORS support and rate limiting
+2. **Ingest Lambda**: Validates incoming events, enriches with metadata (timestamps, IDs), and enqueues to SQS
+3. **SQS Queue**: Decouples ingestion from processing, provides message buffering and automatic retries
+4. **Processor Lambda**: Consumes messages in batches, writes to DynamoDB with idempotency guarantees
+5. **DynamoDB**: Stores processed events with composite key (`pk`, `sk`) for efficient querying
+6. **Dead Letter Queue (DLQ)**: Captures failed messages after max retries for investigation and replay
+7. **CloudWatch**: Centralized logging, metrics dashboards, and production alarms
 
-For detailed architecture information, see [docs/architecture.md](docs/architecture.md).
+## Reliability & Idempotency
+
+EventForge implements **at-least-once delivery** with **exactly-once persistence** guarantees through:
+
+### Client-Supplied Event IDs
+- Clients can provide an `id` field in the event payload for natural deduplication
+- If not provided, the system generates a UUID automatically
+- Example: `{"id": "order-123", "type": "order-placed", "data": {...}}`
+
+### Conditional Writes to DynamoDB
+The processor uses DynamoDB's conditional writes to prevent duplicate event storage:
+
+```typescript
+// DynamoDB Item Schema
+{
+  pk: "EVENT#<id>",           // Partition key
+  sk: "v0",                    // Sort key (constant version)
+  timestamp: "2026-01-10T...", // ISO timestamp
+  type: "order-placed",
+  data: {...},
+  requestId: "req-uuid",
+  raw: "<original-sqs-body>"
+}
+
+// Conditional Write
+ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)'
+```
+
+**Behavior:**
+- ✅ First write succeeds → Event stored
+- ⚠️ Duplicate detected → ConditionalCheckFailedException caught, logged as warning, no error thrown
+- ✅ SQS message deleted successfully in both cases
+
+### Retry & Failure Handling
+- **SQS Retries**: Up to 3 retry attempts with exponential backoff
+- **Dead Letter Queue**: Failed messages moved to DLQ after max retries
+- **Partial Batch Failures**: Individual message failures don't reprocess entire batch
+
+**Result**: Sending the same event ID multiple times results in exactly one DynamoDB record, even with SQS retries.
+
+## Observability & Monitoring
+
+EventForge includes production-grade observability across all layers of the stack.
+
+### CloudWatch Dashboard
+
+Real-time operational dashboard monitoring the entire pipeline:
+
+![CloudWatch Dashboard - Overview](docs/screenshots/cloudwatch-dashboard-overview.png)
+
+![CloudWatch Dashboard - Lambda and SQS Metrics](docs/screenshots/cloudwatch-dashboard-lambda-sqs.png)
+
+**Dashboard Widgets:**
+- **API Gateway**: Request count, 4XX/5XX errors, latency (avg)
+- **Lambda Functions**: Invocations, errors, throttles, duration (p95)
+- **SQS Queues**: Message depth, oldest message age (EventQueue + DLQ)
+
+Access: `CloudWatch → Dashboards → <stack-name>-monitoring`
+
+### CloudWatch Alarms
+
+Four production-ready alarms for critical failure scenarios:
+
+| Alarm | Metric | Threshold | Action Required |
+|-------|--------|-----------|-----------------|
+| **DLQ Messages** | `ApproximateNumberOfMessagesVisible` | ≥ 1 message | Investigate DLQ for failed events; check processor logs |
+| **Queue Age** | `ApproximateAgeOfOldestMessage` | ≥ 60 seconds (2 min) | Check Lambda concurrency limits; verify DynamoDB capacity |
+| **Processor Errors** | Lambda `Errors` | ≥ 1 error | Review structured logs for failure root cause |
+| **API 5XX Errors** | API Gateway `5XXError` | ≥ 1 error | Check IngestFunction health; verify SQS availability |
+
+All alarms configured with `TreatMissingData: notBreaching` to avoid false positives during low traffic.
+
+### Structured Logging
+
+All Lambda functions emit **single-line JSON logs** for easy parsing and searching:
+
+```json
+{
+  "level": "INFO",
+  "service": "processor",
+  "message": "Successfully processed event",
+  "eventId": "order-123",
+  "requestId": "req-uuid",
+  "sqsMessageId": "msg-uuid",
+  "timestamp": "2026-01-10T12:34:56.789Z",
+  "meta": {"pk": "EVENT#order-123", "sk": "v0"}
+}
+```
+
+**CloudWatch Insights Query Example:**
+```sql
+fields @timestamp, level, service, message, eventId, requestId
+| filter level = "ERROR"
+| sort @timestamp desc
+| limit 100
+```
+
+**Tail Logs in Real-Time:**
+```bash
+sam logs -n IngestFunction --stack-name eventforge-dev --tail
+sam logs -n ProcessorFunction --stack-name eventforge-dev --tail
+```
+
+## Why This Project Matters
+
+EventForge demonstrates skills and patterns relevant to senior backend and platform engineering roles:
+
+### 1. **Real Production Architecture**
+This mirrors event ingestion systems used at scale in production environments (e.g., analytics platforms, audit logging, event sourcing). The decoupled architecture allows independent scaling of ingestion and processing layers.
+
+### 2. **Operational Maturity**
+Beyond "make it work," this project shows:
+- **Observability**: Dashboards, alarms, structured logging
+- **Reliability**: Idempotency, retries, DLQs, conditional writes
+- **Cost Efficiency**: Serverless with pay-per-use pricing
+
+### 3. **Distributed Systems Patterns**
+Implements concepts critical to distributed systems:
+- Idempotency keys and deduplication
+- At-least-once delivery with exactly-once semantics
+- Backpressure handling via SQS buffering
+- Failure isolation with dead letter queues
+
+### 4. **Infrastructure as Code**
+Entire stack defined in `infra/template.yaml` using AWS SAM, enabling:
+- Reproducible deployments across environments (dev, staging, prod)
+- Version-controlled infrastructure changes
+- Multi-stack deployments without resource collisions
+
+### 5. **Relevant to Backend & Platform Roles**
+Skills demonstrated:
+- Event-driven architectures
+- AWS serverless services (Lambda, API Gateway, SQS, DynamoDB)
+- Production observability practices
+- TypeScript for Lambda functions
+- Infrastructure as Code (AWS SAM / CloudFormation)
+
+## Tech Stack
+
+- **Runtime**: Node.js 20 with TypeScript
+- **Infrastructure as Code**: AWS SAM (Serverless Application Model)
+- **API Layer**: Amazon API Gateway (REST API)
+- **Compute**: AWS Lambda (Node.js 20, ARM64)
+- **Messaging**: Amazon SQS + Dead Letter Queue
+- **Database**: Amazon DynamoDB (on-demand billing)
+- **Observability**: Amazon CloudWatch (Dashboards, Alarms, Logs)
+- **Development**: esbuild (bundling), AWS SDK v2
 
 ## Idempotency Proof
 
@@ -59,143 +240,126 @@ Expected output: `1` (only one record, even though we sent the event twice)
 
 The processor logs duplicate attempts as warnings without throwing errors, ensuring graceful handling of retries.
 
-## Observability
-
-EventForge includes comprehensive monitoring through CloudWatch dashboards, alarms, and structured JSON logging.
-
-### CloudWatch Dashboard
-
-Access the monitoring dashboard:
-
-```bash
-# Get the dashboard URL from stack outputs
-aws cloudformation describe-stacks \
-  --stack-name <your-stack-name> \
-  --query "Stacks[0].Outputs[?OutputKey=='DashboardUrl'].OutputValue" \
-  --output text
-```
-
-Or navigate to: **CloudWatch → Dashboards → eventforge-monitoring**
-
-The dashboard displays:
-- API Gateway request errors, count, and latency
-- Lambda function metrics (invocations, errors, throttles, duration p95)
-- SQS queue depth and message age for both EventQueue and DLQ
-
-### CloudWatch Alarms
-
-Four production-ready alarms monitor system health:
-
-| Alarm | Triggers When | What It Means |
-|-------|---------------|---------------|
-| **DLQ Messages** | ≥1 message in DLQ | Events failed processing after 3 retries - investigate DLQ |
-| **Queue Age** | Messages older than 60s for 2 min | Processing backlog - check Lambda concurrency/DynamoDB |
-| **Processor Errors** | ≥1 Lambda error | ProcessorFunction failures - check logs for errors |
-| **API 5XX Errors** | ≥1 API Gateway 5XX | IngestFunction or SQS issues - check service health |
-
-View alarms in: **CloudWatch → Alarms**
-
-### Viewing Logs
-
-All logs are structured JSON for easy parsing and searching.
-
-**Tail logs in real-time:**
-
-```bash
-# IngestFunction logs
-sam logs -n IngestFunction --stack-name <your-stack-name> --tail
-
-# ProcessorFunction logs
-sam logs -n ProcessorFunction --stack-name <your-stack-name> --tail
-```
-
-**Search logs in CloudWatch Insights:**
-
-```sql
-# Find errors across both functions
-fields @timestamp, level, service, message, eventId, requestId
-| filter level = "ERROR"
-| sort @timestamp desc
-| limit 100
-```
-
-**Log Structure:**
-
-Each log entry includes:
-- `level`: INFO | WARN | ERROR
-- `service`: ingest-api | processor
-- `message`: Human-readable description
-- `eventId`: Event identifier (when available)
-- `requestId`: Request correlation ID (when available)
-- `sqsMessageId`: SQS message ID (processor only)
-- `timestamp`: ISO 8601 timestamp
-- `meta`: Additional context
-
-## Local Development
+## Deployment
 
 ### Prerequisites
 
-- Node.js 18+ and npm
-- AWS CLI configured with appropriate credentials
-- AWS SAM CLI or Terraform (depending on deployment method)
+- **Node.js 20+** and npm
+- **AWS CLI** configured with credentials
+- **AWS SAM CLI** installed ([installation guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html))
 
-### Build
-
-```bash
-# Install dependencies for ingest API
-cd services/ingest-api
-npm install
-
-# Run tests
-npm test
-
-# Build the Lambda function
-npm run build
-```
-
-### Deploy
+### Build and Deploy
 
 ```bash
-# Deploy using AWS SAM (Phase 1)
-cd services/ingest-api
-sam build
+# 1. Build Lambda functions
+cd services/ingest-api && npm install && npm run build
+cd ../processor && npm install && npm run build
+
+# 2. Build SAM application
+cd ../../infra
+sam build --template-file template.yaml
+
+# 3. Deploy (first time - interactive)
 sam deploy --guided
 
-# Or deploy using Terraform (Phase 4)
-cd infra
-terraform init
-terraform plan
-terraform apply
+# 4. Deploy (subsequent deployments)
+sam deploy
 ```
 
-## Roadmap
+**Deployment Outputs:**
+- `ApiUrl`: API Gateway endpoint for sending events
+- `DashboardUrl`: CloudWatch dashboard URL
+- `QueueUrl`: SQS queue URL
+- `EventTableName`: DynamoDB table name
+- Alarm names for all CloudWatch alarms
 
-See [docs/roadmap.md](docs/roadmap.md) for detailed phases.
+### Verify Deployment
 
-- [x] **Phase 1**: Core ingest API (API Gateway + Lambda + SQS)
-- [ ] **Phase 2**: Event processor and DynamoDB persistence
-- [ ] **Phase 3**: Monitoring dashboard and observability
-- [ ] **Phase 4**: Terraform infrastructure hardening
+```bash
+# Get API endpoint
+API_URL=$(aws cloudformation describe-stacks \
+  --stack-name eventforge-dev \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+  --output text)
+
+# Send test event
+curl -X POST "$API_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"test-event","data":{"message":"Hello EventForge"}}'
+
+# Check CloudWatch dashboard
+# Navigate to CloudWatch → Dashboards → eventforge-dev-monitoring
+```
+
+## Local Development
+
+### Build Services
+
+```bash
+# IngestFunction
+cd services/ingest-api
+npm install
+npm run build  # Output: dist/handler.js
+
+# ProcessorFunction
+cd ../processor
+npm install
+npm run build  # Output: dist/handler.js
+```
+
+### Run Tests
+
+```bash
+# IngestFunction tests
+cd services/ingest-api
+npm test
+
+# ProcessorFunction tests
+cd ../processor
+npm test
+```
+
+### View Logs
+
+```bash
+# Tail logs in real-time
+sam logs -n IngestFunction --stack-name eventforge-dev --tail
+sam logs -n ProcessorFunction --stack-name eventforge-dev --tail
+
+# Query specific time range
+sam logs -n ProcessorFunction --stack-name eventforge-dev \
+  --start-time '10min ago' --end-time 'now'
+```
 
 ## Project Structure
 
 ```
 eventforge/
 ├── services/
-│   └── ingest-api/       # Event ingestion service
-│       └── src/          # Lambda function source code
-├── infra/                # Infrastructure as Code (Terraform)
-├── docs/                 # Documentation
-├── dashboard/            # Monitoring dashboard (Phase 3)
-└── .github/workflows/    # CI/CD pipelines
+│   ├── ingest-api/           # Event ingestion Lambda
+│   │   ├── src/
+│   │   │   └── handler.ts    # API Gateway handler with validation
+│   │   ├── package.json
+│   │   └── tsconfig.json
+│   └── processor/            # Event processor Lambda
+│       ├── src/
+│       │   └── handler.ts    # SQS consumer with DynamoDB writes
+│       ├── package.json
+│       └── tsconfig.json
+├── infra/
+│   ├── template.yaml         # SAM/CloudFormation template
+│   └── samconfig.toml        # SAM deployment configuration
+├── docs/
+│   ├── architecture.md       # Detailed architecture documentation
+│   ├── roadmap.md           # Project roadmap and phases
+│   └── screenshots/         # Dashboard and monitoring screenshots
+└── README.md                # This file
 ```
 
-## Contributing
+## Additional Documentation
 
-1. Create a feature branch
-2. Make your changes
-3. Run tests and linting
-4. Submit a pull request
+- [Architecture Deep Dive](docs/architecture.md) - Detailed component descriptions and reliability patterns
+- [Project Roadmap](docs/roadmap.md) - Implementation phases and future enhancements
 
 ## License
 
