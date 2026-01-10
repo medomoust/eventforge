@@ -1,0 +1,30 @@
+{
+  "name": "eventforge-ingest-api",
+  "version": "1.0.0",
+  "description": "EventForge event ingestion Lambda function",
+  "main": "dist/handler.js",
+  "scripts": {
+    "build": "esbuild src/handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js --sourcemap",
+    "test": "echo \"No tests yet\" && exit 0",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean"
+  },
+  "keywords": [
+    "lambda",
+    "aws",
+    "eventforge",
+    "serverless"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "aws-sdk": "^2.1540.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.131",
+    "@types/node": "^20.11.5",
+    "esbuild": "^0.19.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

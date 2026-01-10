@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: EventForge - Event Ingestion API
+
+Globals:
+  Function:
+    Timeout: 15
+    MemorySize: 256
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        NODE_ENV: production
+
+Resources:
+  # SQS Queue for event ingestion
+  EventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: eventforge-event-queue
+      VisibilityTimeout: 30
+      MessageRetentionPeriod: 345600  # 4 days
+      ReceiveMessageWaitTimeSeconds: 20  # Enable long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Project
+          Value: EventForge
+        - Key: Component
+          Value: EventQueue
+
+  # Dead Letter Queue for failed messages
+  EventDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: eventforge-event-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Project
+          Value: EventForge
+        - Key: Component
+          Value: EventDLQ
+
+  # Lambda function for event ingestion
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: eventforge-ingest
+      CodeUri: ../services/ingest-api
+      Handler: dist/handler.handler
+      Description: Ingests events from API Gateway and publishes to SQS
+      Environment:
+        Variables:
+          EVENT_QUEUE_URL: !Ref EventQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt EventQueue.QueueName
+      Events:
+        IngestApi:
+          Type: Api
+          Properties:
+            Path: /events
+            Method: POST
+            RestApiId: !Ref EventApi
+      Tags:
+        Project: EventForge
+        Component: IngestFunction
+
+  # API Gateway REST API
+  EventApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: eventforge-api
+      StageName: Prod
+      Cors:
+        AllowMethods: "'POST, OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      TracingEnabled: true
+      Tags:
+        Project: EventForge
+        Component: API
+
+  # CloudWatch Alarm for DLQ messages
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: eventforge-dlq-messages
+      AlarmDescription: Alert when messages appear in the DLQ
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt EventDLQ.QueueName
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub "https://${EventApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/events"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  QueueUrl:
+    Description: URL of the SQS Event Queue
+    Value: !Ref EventQueue
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueUrl"
+
+  QueueArn:
+    Description: ARN of the SQS Event Queue
+    Value: !GetAtt EventQueue.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-QueueArn"
+
+  DLQUrl:
+    Description: URL of the Dead Letter Queue
+    Value: !Ref EventDLQ
+    Export:
+      Name: !Sub "${AWS::StackName}-DLQUrl"
+
+  IngestFunctionArn:
+    Description: ARN of the Ingest Lambda function
+    Value: !GetAtt IngestFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-IngestFunctionArn"
