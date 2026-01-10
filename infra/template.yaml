@@ -101,6 +101,53 @@ Resources:
           Value: !GetAtt EventDLQ.QueueName
       TreatMissingData: notBreaching
 
+  # Phase 2: DynamoDB table for storing events
+  EventStore:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: eventforge-event-store
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: EventForge
+        - Key: Component
+          Value: EventStore
+
+  # Phase 2: Lambda function for processing events from SQS to DynamoDB
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: eventforge-processor
+      CodeUri: ../services/processor
+      Handler: dist/handler.handler
+      Runtime: nodejs20.x
+      Description: Processes events from SQS and stores in DynamoDB
+      Environment:
+        Variables:
+          EVENT_TABLE_NAME: !Ref EventStore
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref EventStore
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventQueue.Arn
+            BatchSize: 5
+      Tags:
+        Project: EventForge
+        Component: ProcessorFunction
+
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL for Prod stage
@@ -131,3 +178,9 @@ Outputs:
     Value: !GetAtt IngestFunction.Arn
     Export:
       Name: !Sub "${AWS::StackName}-IngestFunctionArn"
+
+  EventTableName:
+    Description: Name of the DynamoDB Event Store table
+    Value: !Ref EventStore
+    Export:
+      Name: !Sub "${AWS::StackName}-EventTableName"

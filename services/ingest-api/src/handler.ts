@@ -14,8 +14,11 @@ interface EventPayload {
 }
 
 interface IncomingEventData {
+  id?: string;
   type?: string;
+  timestamp?: string;
   data?: any;
+  requestId?: string;
 }
 
 export const handler = async (
@@ -83,11 +86,11 @@ export const handler = async (
 
   // Build event object
   const eventPayload: EventPayload = {
-    id: randomUUID(),
+    id: incomingData.id || randomUUID(),
     type: incomingData.type,
-    timestamp: new Date().toISOString(),
+    timestamp: incomingData.timestamp || new Date().toISOString(),
     data: incomingData.data,
-    requestId: event.requestContext.requestId,
+    requestId: incomingData.requestId || randomUUID(),
   };
 
   console.log('Built event payload:', JSON.stringify(eventPayload, null, 2));

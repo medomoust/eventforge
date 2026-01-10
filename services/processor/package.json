@@ -1,0 +1,26 @@
+{
+  "name": "@eventforge/processor",
+  "version": "1.0.0",
+  "description": "Event processor Lambda triggered by SQS",
+  "main": "dist/handler.js",
+  "scripts": {
+    "build": "esbuild src/handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js --external:aws-sdk",
+    "test": "echo \"Error: no test specified\" && exit 0"
+  },
+  "keywords": [
+    "lambda",
+    "sqs",
+    "eventforge"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.1691.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "esbuild": "^0.19.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

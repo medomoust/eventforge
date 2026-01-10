@@ -87,14 +87,22 @@ EventForge is designed as a serverless, event-driven architecture leveraging AWS
 
 ### DynamoDB
 
-- **Table**: `eventforge-events`
-- **Partition Key**: `eventId` (UUID)
-- **Sort Key**: `timestamp` (ISO 8601)
+- **Table**: `eventforge-event-store`
+- **Partition Key**: `pk` (String) - Format: `"EVENT#" + id`
+- **Sort Key**: `sk` (String) - Constant: `"v0"`
+- **Attributes**:
+  - `type`: Event type
+  - `timestamp`: ISO 8601 timestamp (stored as attribute, not key)
+  - `data`: Event payload data
+  - `requestId`: Request correlation ID
+  - `raw`: Original SQS message body
+  - `processedAt`: Processing timestamp
+  - `sqsMessageId`: SQS message identifier
 - **Features**:
-  - On-demand billing mode
-  - Point-in-time recovery enabled
-  - TTL for automatic data expiration (optional)
-  - GSIs for querying by event type, source, etc.
+  - Pay-per-request billing mode
+  - Idempotency via conditional writes
+  - Point-in-time recovery enabled (optional)
+  - GSIs for querying by event type, timestamp, etc. (future enhancement)
 
 ### Dead Letter Queue (DLQ)
 
@@ -109,22 +117,40 @@ EventForge is designed as a serverless, event-driven architecture leveraging AWS
 
 **Problem**: Duplicate event processing can occur due to retries, at-least-once delivery semantics, or client retries.
 
-**Solution**:
+**Solution (Implemented)**:
 
-1. **Client-Provided Idempotency Keys**
-   - Clients include `idempotencyKey` in event payload
-   - Lambda checks DynamoDB for existing event with same key
-   - If exists, return success without reprocessing
+EventForge guarantees exactly-once event storage using conditional writes to DynamoDB.
 
-2. **Event ID Generation**
-   - Generate deterministic event IDs using hash of key fields
-   - Store in DynamoDB with conditional write
-   - Fail gracefully on duplicate key violations
+1. **Event ID-Based Idempotency**
+   - Clients can provide an `id` field in the event payload
+   - If not provided, the system generates a UUID
+   - The processor uses `pk = "EVENT#" + id` and `sk = "v0"` as the composite key
+   - Conditional write: `attribute_not_exists(pk) AND attribute_not_exists(sk)`
 
-3. **SQS Message Deduplication**
-   - Use FIFO queue option for strict ordering (if required)
-   - Set deduplication interval (5 minutes)
-   - Content-based deduplication using message body hash
+2. **Duplicate Handling**
+   - If the same event `id` is processed multiple times (e.g., SQS retries), the conditional write fails
+   - The processor logs the duplicate as a warning and continues without throwing an error
+   - Only the first write succeeds; subsequent attempts are safely ignored
+
+3. **Proof of Idempotency**
+   ```bash
+   # Send the same event twice
+   curl -X POST "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events" \
+     -H "Content-Type: application/json" \
+     -d '{"id":"idem-test-001","type":"test","data":{"try":1}}'
+   
+   curl -X POST "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events" \
+     -H "Content-Type: application/json" \
+     -d '{"id":"idem-test-001","type":"test","data":{"try":2}}'
+   
+   # Verify only one record exists
+   aws dynamodb query \
+     --table-name "eventforge-event-store" \
+     --key-condition-expression "pk = :pk" \
+     --expression-attribute-values '{":pk":{"S":"EVENT#idem-test-001"}}' \
+     --query "Count" --output text
+   # Output: 1
+   ```
 
 ### Reliability Measures
 

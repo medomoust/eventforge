@@ -25,6 +25,40 @@ Client → API Gateway → Lambda (Ingest) → SQS → Lambda (Processor) → Dy
 
 For detailed architecture information, see [docs/architecture.md](docs/architecture.md).
 
+## Idempotency Proof
+
+EventForge guarantees that sending the same event `id` multiple times results in exactly one DynamoDB record. The processor Lambda uses conditional writes (`attribute_not_exists(pk) AND attribute_not_exists(sk)`) to prevent duplicate entries.
+
+**Example Test:**
+
+Send the same event twice with `id: "idem-test-001"`:
+
+```bash
+# First request
+curl -X POST "https://<your-api-id>.execute-api.<region>.amazonaws.com/Prod/events" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"idem-test-001","type":"idempotency-test","data":{"try":1}}'
+
+# Second request (same id)
+curl -X POST "https://<your-api-id>.execute-api.<region>.amazonaws.com/Prod/events" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"idem-test-001","type":"idempotency-test","data":{"try":2}}'
+```
+
+**Verify only one record exists:**
+
+```bash
+aws dynamodb query \
+  --table-name "eventforge-event-store" \
+  --key-condition-expression "pk = :pk" \
+  --expression-attribute-values '{":pk":{"S":"EVENT#idem-test-001"}}' \
+  --query "Count" --output text
+```
+
+Expected output: `1` (only one record, even though we sent the event twice)
+
+The processor logs duplicate attempts as warnings without throwing errors, ensuring graceful handling of retries.
+
 ## Local Development
 
 ### Prerequisites
