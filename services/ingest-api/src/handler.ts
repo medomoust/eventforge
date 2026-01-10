@@ -21,14 +21,42 @@ interface IncomingEventData {
   requestId?: string;
 }
 
+type LogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+interface LogContext {
+  level: LogLevel;
+  service: string;
+  message: string;
+  eventId?: string;
+  requestId?: string;
+  timestamp: string;
+  meta?: Record<string, any>;
+}
+
+/**
+ * Structured logging helper for CloudWatch
+ */
+function log(level: LogLevel, message: string, context?: Partial<Omit<LogContext, 'level' | 'service' | 'message' | 'timestamp'>>): void {
+  const logEntry: LogContext = {
+    level,
+    service: 'ingest-api',
+    message,
+    timestamp: new Date().toISOString(),
+    ...context,
+  };
+  console.log(JSON.stringify(logEntry));
+}
+
 export const handler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
-  console.log('Received event:', JSON.stringify(event, null, 2));
+  log('INFO', 'Received request', {
+    meta: { path: event.path, httpMethod: event.httpMethod },
+  });
 
   // Validate queue URL is configured
   if (!QUEUE_URL) {
-    console.error('EVENT_QUEUE_URL environment variable is not set');
+    log('ERROR', 'EVENT_QUEUE_URL environment variable is not set');
     return {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },
@@ -42,6 +70,7 @@ export const handler = async (
   let incomingData: IncomingEventData;
   try {
     if (!event.body) {
+      log('WARN', 'Request body is missing');
       return {
         statusCode: 400,
         headers: { 'Content-Type': 'application/json' },
@@ -55,6 +84,9 @@ export const handler = async (
 
     // Validate required fields
     if (!incomingData.type || typeof incomingData.type !== 'string') {
+      log('WARN', 'Validation failed: missing or invalid type field', {
+        meta: { hasType: !!incomingData.type },
+      });
       return {
         statusCode: 400,
         headers: { 'Content-Type': 'application/json' },
@@ -65,6 +97,9 @@ export const handler = async (
     }
 
     if (incomingData.data === undefined) {
+      log('WARN', 'Validation failed: missing data field', {
+        meta: { type: incomingData.type },
+      });
       return {
         statusCode: 400,
         headers: { 'Content-Type': 'application/json' },
@@ -74,7 +109,9 @@ export const handler = async (
       };
     }
   } catch (error) {
-    console.error('Failed to parse request body:', error);
+    log('ERROR', 'Failed to parse request body', {
+      meta: { error: error instanceof Error ? error.message : String(error) },
+    });
     return {
       statusCode: 400,
       headers: { 'Content-Type': 'application/json' },
@@ -93,7 +130,11 @@ export const handler = async (
     requestId: incomingData.requestId || randomUUID(),
   };
 
-  console.log('Built event payload:', JSON.stringify(eventPayload, null, 2));
+  log('INFO', 'Validated request body', {
+    eventId: eventPayload.id,
+    requestId: eventPayload.requestId,
+    meta: { type: eventPayload.type },
+  });
 
   // Send to SQS
   try {
@@ -113,7 +154,18 @@ export const handler = async (
     };
 
     const result = await sqs.sendMessage(params).promise();
-    console.log('Successfully sent message to SQS:', result.MessageId);
+    
+    log('INFO', 'Enqueued message to SQS', {
+      eventId: eventPayload.id,
+      requestId: eventPayload.requestId,
+      meta: { sqsMessageId: result.MessageId },
+    });
+
+    log('INFO', 'Returning response to client', {
+      eventId: eventPayload.id,
+      requestId: eventPayload.requestId,
+      meta: { statusCode: 202 },
+    });
 
     return {
       statusCode: 202,
@@ -129,7 +181,14 @@ export const handler = async (
       }),
     };
   } catch (error) {
-    console.error('Failed to send message to SQS:', error);
+    log('ERROR', 'Failed to send message to SQS', {
+      eventId: eventPayload.id,
+      requestId: eventPayload.requestId,
+      meta: {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : undefined,
+      },
+    });
     return {
       statusCode: 500,
       headers: { 'Content-Type': 'application/json' },

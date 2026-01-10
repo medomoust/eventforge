@@ -12,6 +12,33 @@ interface EventRecord {
   requestId?: string;
 }
 
+type LogLevel = 'INFO' | 'WARN' | 'ERROR';
+
+interface LogContext {
+  level: LogLevel;
+  service: string;
+  message: string;
+  eventId?: string;
+  requestId?: string;
+  sqsMessageId?: string;
+  timestamp: string;
+  meta?: Record<string, any>;
+}
+
+/**
+ * Structured logging helper for CloudWatch
+ */
+function log(level: LogLevel, message: string, context?: Partial<Omit<LogContext, 'level' | 'service' | 'message' | 'timestamp'>>): void {
+  const logEntry: LogContext = {
+    level,
+    service: 'processor',
+    message,
+    timestamp: new Date().toISOString(),
+    ...context,
+  };
+  console.log(JSON.stringify(logEntry));
+}
+
 /**
  * Safely parses and validates an event record from SQS message body
  */
@@ -32,9 +59,9 @@ function parseEventRecord(body: string, messageId: string): EventRecord {
       requestId: parsed.requestId,
     };
   } catch (error) {
-    console.error('Failed to parse event body:', {
-      messageId,
-      error: error instanceof Error ? error.message : String(error),
+    log('ERROR', 'Failed to parse event body', {
+      sqsMessageId: messageId,
+      meta: { error: error instanceof Error ? error.message : String(error) },
     });
     throw error;
   }
@@ -61,11 +88,11 @@ async function processRecord(record: SQSRecord): Promise<void> {
       throw new Error('Missing required field: timestamp');
     }
 
-    console.log('Processing event:', {
-      id: event.id,
-      type: event.type,
-      timestamp: event.timestamp,
-      messageId,
+    log('INFO', 'Processing event', {
+      eventId: event.id,
+      requestId: event.requestId,
+      sqsMessageId: messageId,
+      meta: { type: event.type, timestamp: event.timestamp },
     });
 
     // Write to DynamoDB with idempotency via conditional put
@@ -89,27 +116,33 @@ async function processRecord(record: SQSRecord): Promise<void> {
       ConditionExpression: 'attribute_not_exists(pk) AND attribute_not_exists(sk)',
     }).promise();
 
-    console.log('Successfully processed event:', {
-      id: event.id,
-      pk,
-      sk,
-      messageId,
+    log('INFO', 'Successfully processed event', {
+      eventId: event.id,
+      requestId: event.requestId,
+      sqsMessageId: messageId,
+      meta: { pk, sk },
     });
   } catch (error) {
     // Handle conditional check failure (duplicate) differently
     if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
-      console.warn('Event already processed (idempotent):', {
-        messageId,
-        reason: 'duplicate',
+      const event = parseEventRecord(record.body, messageId);
+      log('WARN', 'Duplicate event detected (idempotent)', {
+        eventId: event.id,
+        requestId: event.requestId,
+        sqsMessageId: messageId,
+        meta: { reason: 'ConditionalCheckFailedException' },
       });
       // Don't throw - this is expected on retry
       return;
     }
 
-    console.error('Error processing record:', {
-      messageId,
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
+    log('ERROR', 'Error processing record', {
+      sqsMessageId: messageId,
+      meta: {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : undefined,
+        stack: error instanceof Error ? error.stack : undefined,
+      },
     });
     throw error;
   }
@@ -119,8 +152,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
  * Lambda handler for SQS-triggered event processing
  */
 export const handler: SQSHandler = async (event: SQSEvent): Promise<void> => {
-  console.log('Received SQS batch:', {
-    recordCount: event.Records.length,
+  log('INFO', 'Batch processing started', {
+    meta: { recordCount: event.Records.length },
   });
 
   const results = await Promise.allSettled(
@@ -131,17 +164,19 @@ export const handler: SQSHandler = async (event: SQSEvent): Promise<void> => {
   const failed = results.filter(r => r.status === 'rejected').length;
   const total = results.length;
   
-  console.log('Batch processing summary:', {
-    ok: succeeded,
-    failed,
-    total,
+  log('INFO', 'Batch processing summary', {
+    meta: { ok: succeeded, failed, total },
   });
 
   if (failed > 0) {
-    console.error(`Failed to process ${failed} out of ${total} records`);
+    log('ERROR', `Failed to process ${failed} out of ${total} records`, {
+      meta: { ok: succeeded, failed, total },
+    });
     // Throwing will cause the batch to be retried and eventually sent to DLQ
     throw new Error(`Failed to process ${failed} records`);
   }
 
-  console.log(`Successfully processed all ${total} records`);
+  log('INFO', 'Batch processing completed successfully', {
+    meta: { total },
+  });
 };

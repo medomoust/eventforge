@@ -59,6 +59,78 @@ Expected output: `1` (only one record, even though we sent the event twice)
 
 The processor logs duplicate attempts as warnings without throwing errors, ensuring graceful handling of retries.
 
+## Observability
+
+EventForge includes comprehensive monitoring through CloudWatch dashboards, alarms, and structured JSON logging.
+
+### CloudWatch Dashboard
+
+Access the monitoring dashboard:
+
+```bash
+# Get the dashboard URL from stack outputs
+aws cloudformation describe-stacks \
+  --stack-name <your-stack-name> \
+  --query "Stacks[0].Outputs[?OutputKey=='DashboardUrl'].OutputValue" \
+  --output text
+```
+
+Or navigate to: **CloudWatch → Dashboards → eventforge-monitoring**
+
+The dashboard displays:
+- API Gateway request errors, count, and latency
+- Lambda function metrics (invocations, errors, throttles, duration p95)
+- SQS queue depth and message age for both EventQueue and DLQ
+
+### CloudWatch Alarms
+
+Four production-ready alarms monitor system health:
+
+| Alarm | Triggers When | What It Means |
+|-------|---------------|---------------|
+| **DLQ Messages** | ≥1 message in DLQ | Events failed processing after 3 retries - investigate DLQ |
+| **Queue Age** | Messages older than 60s for 2 min | Processing backlog - check Lambda concurrency/DynamoDB |
+| **Processor Errors** | ≥1 Lambda error | ProcessorFunction failures - check logs for errors |
+| **API 5XX Errors** | ≥1 API Gateway 5XX | IngestFunction or SQS issues - check service health |
+
+View alarms in: **CloudWatch → Alarms**
+
+### Viewing Logs
+
+All logs are structured JSON for easy parsing and searching.
+
+**Tail logs in real-time:**
+
+```bash
+# IngestFunction logs
+sam logs -n IngestFunction --stack-name <your-stack-name> --tail
+
+# ProcessorFunction logs
+sam logs -n ProcessorFunction --stack-name <your-stack-name> --tail
+```
+
+**Search logs in CloudWatch Insights:**
+
+```sql
+# Find errors across both functions
+fields @timestamp, level, service, message, eventId, requestId
+| filter level = "ERROR"
+| sort @timestamp desc
+| limit 100
+```
+
+**Log Structure:**
+
+Each log entry includes:
+- `level`: INFO | WARN | ERROR
+- `service`: ingest-api | processor
+- `message`: Human-readable description
+- `eventId`: Event identifier (when available)
+- `requestId`: Request correlation ID (when available)
+- `sqsMessageId`: SQS message ID (processor only)
+- `timestamp`: ISO 8601 timestamp
+- `meta`: Additional context
+
 ## Local Development
 
 ### Prerequisites

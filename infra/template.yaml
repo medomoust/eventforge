@@ -9,6 +9,9 @@ Globals:
     Runtime: nodejs20.x
     Architectures:
       - arm64
+    LoggingConfig:
+      LogFormat: JSON
+      ApplicationLogLevel: INFO
     Environment:
       Variables:
         NODE_ENV: production
@@ -83,12 +86,14 @@ Resources:
         Project: EventForge
         Component: API
 
-  # CloudWatch Alarm for DLQ messages
-  DLQAlarm:
+  # CloudWatch Alarms for production monitoring
+  
+  # Alarm when messages appear in the Dead Letter Queue
+  DLQMessagesAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: eventforge-dlq-messages
-      AlarmDescription: Alert when messages appear in the DLQ
+      AlarmName: !Sub "${AWS::StackName}-dlq-messages"
+      AlarmDescription: Alert when messages appear in the DLQ - indicates failed processing
       MetricName: ApproximateNumberOfMessagesVisible
       Namespace: AWS/SQS
       Statistic: Sum
@@ -100,6 +105,64 @@ Resources:
         - Name: QueueName
           Value: !GetAtt EventDLQ.QueueName
       TreatMissingData: notBreaching
+      AlarmActions: []
+
+  # Alarm when messages are stuck in the queue for too long
+  QueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-queue-age"
+      AlarmDescription: Alert when EventQueue messages are older than 60 seconds - indicates processing backlog
+      MetricName: ApproximateAgeOfOldestMessage
+      Namespace: AWS/SQS
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt EventQueue.QueueName
+      TreatMissingData: notBreaching
+      AlarmActions: []
+
+  # Alarm when ProcessorFunction has errors
+  ProcessorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-processor-errors"
+      AlarmDescription: Alert when ProcessorFunction encounters errors - indicates processing failures
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ProcessorFunction
+      TreatMissingData: notBreaching
+      AlarmActions: []
+
+  # Alarm when API Gateway returns 5XX errors
+  Ingest5XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-api-5xx-errors"
+      AlarmDescription: Alert when API Gateway returns 5XX errors - indicates service failures
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref EventApi
+      TreatMissingData: notBreaching
+      AlarmActions: []
 
   # Phase 2: DynamoDB table for storing events
   EventStore:
@@ -148,6 +211,163 @@ Resources:
         Project: EventForge
         Component: ProcessorFunction
 
+  # CloudWatch Dashboard for EventForge monitoring
+  EventForgeDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-monitoring"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "API Gateway - Request Errors",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/ApiGateway", "4XXError", {"stat": "Sum", "label": "4XX Errors"}],
+                  [".", "5XXError", {"stat": "Sum", "label": "5XX Errors"}]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "API Gateway - Request Count & Latency",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", {"stat": "Sum", "label": "Request Count", "yAxis": "left"}],
+                  [".", "Latency", {"stat": "Average", "label": "Avg Latency (ms)", "yAxis": "right"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  },
+                  "right": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda - IngestFunction Metrics",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Invocations"}],
+                  [".", "Errors", {"stat": "Sum", "label": "Errors"}],
+                  [".", "Throttles", {"stat": "Sum", "label": "Throttles"}],
+                  [".", "Duration", {"stat": "p95", "label": "Duration p95 (ms)"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "Lambda - ProcessorFunction Metrics",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Invocations"}],
+                  [".", "Errors", {"stat": "Sum", "label": "Errors"}],
+                  [".", "Throttles", {"stat": "Sum", "label": "Throttles"}],
+                  [".", "Duration", {"stat": "p95", "label": "Duration p95 (ms)"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "SQS - EventQueue Depth & Age",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", {"stat": "Average", "label": "Messages Visible"}],
+                  [".", "ApproximateAgeOfOldestMessage", {"stat": "Maximum", "label": "Oldest Message Age (s)"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "title": "SQS - Dead Letter Queue",
+                "region": "us-east-1",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", {"stat": "Average", "label": "DLQ Messages"}],
+                  [".", "ApproximateAgeOfOldestMessage", {"stat": "Maximum", "label": "DLQ Oldest Message Age (s)"}]
+                ],
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                },
+                "view": "timeSeries",
+                "stacked": false
+              }
+            }
+          ]
+        }
+
 Outputs:
   ApiUrl:
     Description: API Gateway endpoint URL for Prod stage
@@ -184,3 +404,29 @@ Outputs:
     Value: !Ref EventStore
     Export:
       Name: !Sub "${AWS::StackName}-EventTableName"
+
+  DashboardName:
+    Description: Name of the CloudWatch Dashboard
+    Value: !Ref EventForgeDashboard
+    Export:
+      Name: !Sub "${AWS::StackName}-DashboardName"
+
+  DashboardUrl:
+    Description: URL to access the CloudWatch Dashboard
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-monitoring"
+
+  DLQMessagesAlarmName:
+    Description: Name of the DLQ Messages CloudWatch Alarm
+    Value: !Ref DLQMessagesAlarm
+
+  QueueAgeAlarmName:
+    Description: Name of the Queue Age CloudWatch Alarm
+    Value: !Ref QueueAgeAlarm
+
+  ProcessorErrorsAlarmName:
+    Description: Name of the Processor Errors CloudWatch Alarm
+    Value: !Ref ProcessorErrorsAlarm
+
+  Ingest5XXAlarmName:
+    Description: Name of the API Gateway 5XX Errors CloudWatch Alarm
+    Value: !Ref Ingest5XXAlarm
