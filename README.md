@@ -240,6 +240,96 @@ Expected output: `1` (only one record, even though we sent the event twice)
 
 The processor logs duplicate attempts as warnings without throwing errors, ensuring graceful handling of retries.
 
+## API Endpoints
+
+### POST /events - Ingest Event
+
+Accepts an event payload and enqueues it for processing.
+
+**Request:**
+```bash
+curl -X POST "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "optional-custom-id",
+    "type": "user.signup",
+    "data": {"userId": 123, "email": "user@example.com"}
+  }'
+```
+
+**Response (202 Accepted):**
+```json
+{
+  "accepted": true,
+  "event": {
+    "id": "optional-custom-id",
+    "type": "user.signup",
+    "timestamp": "2026-01-10T12:34:56.789Z"
+  },
+  "messageId": "abc123-sqs-message-id"
+}
+```
+
+### GET /events/recent - Query Recent Events
+
+Retrieves recently processed events from DynamoDB (newest first).
+
+**Request:**
+```bash
+# Get latest 25 events (default)
+curl "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events/recent"
+
+# Get latest 50 events
+curl "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events/recent?limit=50"
+
+# Filter by event type
+curl "https://<api-id>.execute-api.<region>.amazonaws.com/Prod/events/recent?type=user.signup&limit=10"
+```
+
+**Response (200 OK):**
+```json
+{
+  "items": [
+    {
+      "id": "event-123",
+      "type": "user.signup",
+      "timestamp": "2026-01-10T12:34:56.789Z",
+      "data": {"userId": 123},
+      "requestId": "req-abc"
+    }
+  ],
+  "count": 25,
+  "nextToken": "optional-pagination-token"
+}
+```
+
+**Query Parameters:**
+- `limit` (optional): Number of events to return (default 25, max 100)
+- `type` (optional): Filter events by type (e.g., `user.signup`)
+
+**Implementation Details:**
+- Uses DynamoDB Global Secondary Index (GSI1) with `gsi1pk='RECENT'` and `gsi1sk=timestamp`
+- Returns newest events first (`ScanIndexForward: false`)
+- Type filtering uses DynamoDB `FilterExpression` (applied after query, counts toward limit)
+
+**Design Tradeoffs:**
+- ✅ **Pro**: Simple query pattern, efficient for recent events use case
+- ⚠️ **Con**: Type filter is inefficient (scans all results, then filters). For production workloads with many event types, consider a dedicated GSI per type or ElasticSearch/OpenSearch for complex querying.
+- ⚠️ **Con**: GSI costs additional storage (duplicates all attributes). For cost optimization, use `ProjectionType: KEYS_ONLY` if only IDs are needed.
+
+## EventForge Console
+
+A production-quality React + TypeScript operator console is available at [apps/console](apps/console/).
+
+The console provides:
+- **Event Composer**: Send test events with full control (custom IDs for idempotency)
+- **Recent Events Browser**: View, search, and filter your event history
+- **System Health**: Real-time API monitoring and diagnostics
+- **Operations Dashboard**: Quick access to CloudWatch, SQS, and DynamoDB resources
+- **Responsive UI**: Modern, mobile-friendly interface built with React, TypeScript, Tailwind CSS, and TanStack Query
+
+See [apps/console/README.md](apps/console/README.md) for setup and usage instructions.
+
 ## Deployment
 
 ### Prerequisites
@@ -335,25 +425,35 @@ sam logs -n ProcessorFunction --stack-name eventforge-dev \
 
 ```
 eventforge/
+├── apps/
+│   └── console/             # React + TypeScript operator console
+│       ├── src/
+│       │   ├── components/  # UI components (Layout, Cards, Buttons, etc.)
+│       │   ├── hooks/       # TanStack Query hooks
+│       │   ├── lib/         # API client and utilities
+│       │   ├── pages/       # React Router pages (Overview, Events, Ops, Settings)
+│       │   └── types/       # TypeScript type definitions
+│       ├── package.json
+│       └── vite.config.ts
 ├── services/
-│   ├── ingest-api/           # Event ingestion Lambda
+│   ├── ingest-api/          # Event ingestion Lambda
 │   │   ├── src/
-│   │   │   └── handler.ts    # API Gateway handler with validation
+│   │   │   └── handler.ts   # API Gateway handler with validation
 │   │   ├── package.json
 │   │   └── tsconfig.json
-│   └── processor/            # Event processor Lambda
+│   └── processor/           # Event processor Lambda
 │       ├── src/
-│       │   └── handler.ts    # SQS consumer with DynamoDB writes
+│       │   └── handler.ts   # SQS consumer with DynamoDB writes
 │       ├── package.json
 │       └── tsconfig.json
 ├── infra/
-│   ├── template.yaml         # SAM/CloudFormation template
-│   └── samconfig.toml        # SAM deployment configuration
+│   ├── template.yaml        # SAM/CloudFormation template
+│   └── samconfig.toml       # SAM deployment configuration
 ├── docs/
-│   ├── architecture.md       # Detailed architecture documentation
-│   ├── roadmap.md           # Project roadmap and phases
-│   └── screenshots/         # Dashboard and monitoring screenshots
-└── README.md                # This file
+│   ├── architecture.md      # Detailed architecture documentation
+│   ├── roadmap.md          # Project roadmap and phases
+│   └── screenshots/        # Dashboard and monitoring screenshots
+└── README.md               # This file
 ```
 
 ## Additional Documentation

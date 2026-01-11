@@ -104,6 +104,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
       Item: {
         pk,
         sk,
+        gsi1pk: 'RECENT',  // GSI partition key for recent events query
+        gsi1sk: event.timestamp,  // GSI sort key for time-based ordering
         type: event.type || null,
         timestamp: event.timestamp,
         data: event.data || {},

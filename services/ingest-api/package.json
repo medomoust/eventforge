@@ -5,7 +5,7 @@
   "main": "dist/handler.js",
   "scripts": {
     "build": "esbuild src/handler.ts --bundle --platform=node --target=node20 --outfile=dist/handler.js --sourcemap",
-    "test": "echo \"No tests yet\" && exit 0",
+    "test": "npm run build",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean"
   },

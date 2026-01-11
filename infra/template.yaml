@@ -57,15 +57,24 @@ Resources:
       Environment:
         Variables:
           EVENT_QUEUE_URL: !Ref EventQueue
+          EVENT_TABLE_NAME: !Ref EventStore
       Policies:
         - SQSSendMessagePolicy:
             QueueName: !GetAtt EventQueue.QueueName
+        - DynamoDBReadPolicy:
+            TableName: !Ref EventStore
       Events:
-        IngestApi:
+        IngestApiPost:
           Type: Api
           Properties:
             Path: /events
             Method: POST
+            RestApiId: !Ref EventApi
+        IngestApiGetRecent:
+          Type: Api
+          Properties:
+            Path: /events/recent
+            Method: GET
             RestApiId: !Ref EventApi
       Tags:
         Project: EventForge
@@ -78,9 +87,9 @@ Resources:
       Name: eventforge-api
       StageName: Prod
       Cors:
-        AllowMethods: "'POST, OPTIONS'"
-        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-        AllowOrigin: "'*'"
+        AllowMethods: "'OPTIONS,POST,GET'"
+        AllowHeaders: "'content-type,authorization,x-amz-date,x-api-key,x-amz-security-token'"
+        AllowOrigin: "'http://localhost:3000'"
       TracingEnabled: true
       Tags:
         Project: EventForge
@@ -175,11 +184,24 @@ Resources:
           AttributeType: S
         - AttributeName: sk
           AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       Tags:
         - Key: Project
           Value: EventForge
